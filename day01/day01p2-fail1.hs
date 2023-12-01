@@ -33,19 +33,54 @@ import Data.Char (isDigit)
 
 -- Consider your entire calibration document. What is the sum of all of the calibration values?
 
+-- Your puzzle answer was 54708.
+
+-- The first half of this puzzle is complete! It provides one gold star: *
+
+-- --- Part Two ---
+-- Your calculation isn't quite right. It looks like some of the digits are actually spelled out with letters: one, two, three, four, five, six, seven, eight, and nine also count as valid "digits".
+
+-- Equipped with this new information, you now need to find the real first and last digit on each line. For example:
+
+-- two1nine
+-- eightwothree
+-- abcone2threexyz
+-- xtwone3four
+-- 4nineeightseven2
+-- zoneight234
+-- 7pqrstsixteen
+-- In this example, the calibration values are 29, 83, 13, 24, 42, 14, and 76. Adding these together produces 281.
+
+-- What is the sum of all of the calibration values?
+
 main = interact mainFunc
 
 mainFunc :: String -> String
 mainFunc input =
   let allLines = lines input
-      digitLines = [digitsOnly x | x <- allLines]
+      wordDigitReplaced = [fixWordDigits x | x <- allLines]
+      digitLines = [digitsOnly x | x <- wordDigitReplaced]
       firstDigits = [take 1 x | x <- digitLines]
       lastDigits = [drop (length x - 1) x | x <- digitLines]
       digitPairs = zipWith (++) firstDigits lastDigits
       intLines = [read x :: Int | x <- digitPairs]
       theTotal = sum intLines
-      result = show theTotal
-   in "Part1 output is " ++ result ++ "\n"
+      result = show theTotal ++ "\n"
+   in result
 
 digitsOnly :: [Char] -> [Char]
 digitsOnly = filter isDigit
+
+fixWordDigits :: String -> String
+fixWordDigits "" = ""
+-- fixWordDigits ('z' : 'e' : 'r' : 'o' : xs) = '0' : fixWordDigits xs
+fixWordDigits ('o' : 'n' : 'e' : xs) = '1' : fixWordDigits xs
+fixWordDigits ('t' : 'w' : 'o' : xs) = '2' : fixWordDigits xs
+fixWordDigits ('t' : 'h' : 'r' : 'e' : 'e' : xs) = '3' : fixWordDigits xs
+fixWordDigits ('f' : 'o' : 'u' : 'r' : xs) = '4' : fixWordDigits xs
+fixWordDigits ('f' : 'i' : 'v' : 'e' : xs) = '5' : fixWordDigits xs
+fixWordDigits ('s' : 'i' : 'x' : xs) = '6' : fixWordDigits xs
+fixWordDigits ('s' : 'e' : 'v' : 'e' : 'n' : xs) = '7' : fixWordDigits xs
+fixWordDigits ('e' : 'i' : 'g' : 'h' : 't' : xs) = '8' : fixWordDigits xs
+fixWordDigits ('n' : 'i' : 'n' : 'e' : xs) = '9' : fixWordDigits xs
+fixWordDigits (x : xs) = x : fixWordDigits xs

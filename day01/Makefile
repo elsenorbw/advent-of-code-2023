@@ -2,9 +2,9 @@
 OUTPUTDIR=build
 COMPILER_ARGS=-outputdir $(OUTPUTDIR)
 
-build: day01p1
-test: testp1
-run: runp1
+build: day01p2
+test: testp2
+run: runp2
 
 day01p1: day01p1.hs
 	ghc -o $(OUTPUTDIR)/day01p1 $(COMPILER_ARGS) day01p1.hs

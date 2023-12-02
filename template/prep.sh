@@ -18,6 +18,8 @@ fi
 
 echo "Copying in template files.."
 mkdir -p "$TARGET_FOLDER"
+mkdir -p "$TARGET_FOLDER/build"
+
 
 SOURCE_FILES="input.txt test_part1.txt test_part2.txt dayXXp1.hs Makefile"
 for THIS_FILE in $SOURCE_FILES; do

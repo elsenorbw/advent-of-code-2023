@@ -113,7 +113,7 @@
 
 -- The first half of this puzzle is complete! It provides one gold star: *
 
--- --- Part Two ---
+-- --- Part Two ---        ++ "\n\n"
 -- Everyone will starve if you only plant such a small number of seeds. Re-reading the almanac, it looks like the seeds:
 --   line actually describes ranges of seed numbers.
 
@@ -182,7 +182,39 @@
 -- the good news here is that we are effectively flattening all the transformations which gives us a single adjustment layer, making the calcs faster aftwerwards.
 -- still need to have a think about the logic for merging the layers though, but tomorrow.
 
+-- ok, so it's tomorrow and what I think we need now is to write the logic for flattening 2 layers
+-- we need to handle each range in the input layer and for that range generate a new group of ranges (1 or more) which have the rules from the next layer applied:
+-- worked examples then :
+-- starting rule would be 0..Inf = +0
+-- next layer rules : 10..100 = +80
+-- merging needs to give us : 0..9 = +0, 10..100 = +80, 101..Inf = +0
+-- that logic is pretty simple, where it gets tricky is the subsequent layer
+-- next layer rules : 50..120 = -10
+-- so...:
+-- 0..9 = +0 <no change, doesn't match the new rules>
+-- 10..100 = +80 ==> effectively now 90..180 so.. 90..120 = -10,121..180=0 but really this is 10..40 = +70, 41..100 = +80
+-- so the rule for merging is :
+--   we have source_low and source_high - the range of initial input numbers, in the example 10..100
+--   we have source_modifier - what transformation should be done to items in this range so far, in the example +80
+--   we then have effective_low, effective_high - the translation of those values at the current layer using the source modifier, in the example 90..180 (source_modifier=+80)
+--   we have the target_low and target_high, target_modifier - the range of the rules in this current layer, in the example 50..120, -10
+--   we can compute the overlap section - overlap_low..overlap_high - this is the overlap between effective_low..effective_high and target_low..target_high in the example 90..120
+--   we can also compute the left-overs on either end of the overlap - below_low..below_high, above_low..above_high which describe the unaffected parts of the effective range, in the example : below=None, above=121..180
+--                           left-overs are the parts of the effective_range that are not part of the target_range - we only need to worry about dividing up the effective_range as we will loop through all of these
+--   we can now translate these ranges back to source values :
+--   below=None -> Do Nothing
+--   overlap_low..overlap_high -> (overlap_low - source_modifier)..(overlap_high - source_modifier) = source_modifier+target_modifier -> (90-80)..(120-80) = (80+(-10)) -> 10..40 = +70
+--   above=121..180 -> (above_low - source_modifier)..(above_high - source_modifier) = source_modifier -> (121-80)..(180-80) = +80 = 41..100 = +80
+--   so we can see that we have split the source_range correctly : 10..100 -> 10..40,41..100 and the modifiers have been appropriately adjusted
+--   this same logic applies for each current segment and each rule segment in the current layer because :
+--     if there is overlap then this rule will take care of it
+--     no overlap means that either the whole range is in above or below.. and will get translated unmodified
+--   so I believe that we can apply each source segment to each current row segment and using the above rules generate the correct new segmentation
+--   simple.
+
+import Data.List (sort)
 import Data.Maybe (catMaybes)
+import Text.XHtml (start)
 
 main = interact mainFunc
 
@@ -191,45 +223,142 @@ mainFunc input =
   let inputVals = lines input
       seedsLine = head inputVals
       seedsInfo = drop 1 $ splitOn' ' ' seedsLine
+      seedsInfoInts = [read x :: Int | x <- seedsInfo]
       tablesSection = drop 2 inputVals
       tableSections = splitOn' "" tablesSection
       conversionTables = [readConversionTable x | x <- tableSections]
-      -- and generate all the starting segments
-      startingSegments = generateSegments conversionTables [(0, maxBound :: Int)]
-      inputSeedRanges = [read x :: Int | x <- seedsInfo]
-      inputSeeds = extrapolateRanges inputSeedRanges
-      locations = [runConversions x conversionTables | x <- inputSeeds]
+      -- and merge the rules into a single set
+      startingRuleset = [ConversionRule 0 (maxBound :: Int) 0]
+      mergedRules = mergeRules startingRuleset conversionTables
+      -- generate the necessary starting points for each range
+      startingRanges = generateRangesFor seedsInfoInts
+      startingPoints = [generateStartersFor r mergedRules | r <- startingRanges]
+      locations = [runRules x mergedRules | x <- concat startingPoints]
       nearest = smallestOne locations
    in "Lines:"
         ++ show inputVals
         ++ "\nTables:"
         ++ show tableSections
         ++ "\n\nconversionTables:"
-        ++ show conversionTables
-        ++ "\n\nstartingSegments:"
-        ++ show startingSegments
-        ++ "\n\ninputSeedRanges:"
-        ++ show inputSeedRanges
-        ++ "\n\ninputSeeds:"
-        ++ show inputSeeds
-        ++ "\n\nLocations:"
+        ++ printTables conversionTables
+        ++ "\n\nstartingRule:\n"
+        ++ printRules startingRuleset
+        ++ "\n\nmergedRules:\n"
+        ++ printRules mergedRules
+        ++ "\nstartingPoints:\n\n"
+        ++ show startingPoints
+        ++ "\n\nlocations: \n"
         ++ show locations
         ++ "\n\nNearest: "
         ++ show nearest
         ++ "\n"
+
+-- ++ "\n\ninputSeedRanges:"
+-- ++ show inputSeedRanges
+-- ++ "\n\ninputSeeds:"
+-- ++ show inputSeeds
+-- ++ "\n\nLocations:"
+-- ++ show locations
 
 data ConversionRule = ConversionRule
   { rangeStart :: Int,
     rangeEnd :: Int,
     modifierValue :: Int
   }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Ord)
 
 data ConversionTable = ConversionTable
   { tableName :: String,
     rules :: [ConversionRule]
   }
   deriving (Eq, Show)
+
+printRules :: [ConversionRule] -> String
+printRules rules =
+  let strings = [show x ++ "\n" | x <- sort rules]
+   in concat strings
+
+printTables :: [ConversionTable] -> String
+printTables tables =
+  let strings = [tableName t ++ "\n---------------\n" ++ printRules (rules t) ++ "\n" | t <- tables]
+   in concat strings
+
+mergeRules :: [ConversionRule] -> [ConversionTable] -> [ConversionRule]
+mergeRules x [] = x
+mergeRules ruleset tables =
+  let thisTable = head tables
+      remainingTables = drop 1 tables
+      tableRules = rules thisTable
+      -- so we need to split each rules in our current ruleset against every rule in this Conversion Table
+      newRuleset = concat [applyRulesToSegment x tableRules | x <- ruleset]
+   in mergeRules newRuleset remainingTables
+
+applyRulesToSegment :: ConversionRule -> [ConversionRule] -> [ConversionRule]
+applyRulesToSegment sourceRule ruleList =
+  let newSegmentRules = catMaybes [ruleModificationFor sourceRule x | x <- ruleList]
+      gaps = generateGapFills sourceRule (sort newSegmentRules)
+      result = gaps ++ newSegmentRules
+   in result
+
+ruleModificationFor :: ConversionRule -> ConversionRule -> Maybe ConversionRule
+ruleModificationFor source target =
+  let sourceLow = rangeStart source
+      sourceHigh = rangeEnd source
+      sourceModifier = modifierValue source
+      effectiveLow = sourceLow + sourceModifier
+      effectiveHigh = sourceHigh + sourceModifier
+      targetLow = rangeStart target
+      targetHigh = rangeEnd target
+      targetModifier = modifierValue target
+      overlapLow = max effectiveLow targetLow
+      overlapHigh = min effectiveHigh targetHigh
+      remappedLow = overlapLow - sourceModifier
+      remappedHigh = overlapHigh - sourceModifier
+      newModifier = sourceModifier + targetModifier
+      result = if effectiveLow <= targetHigh && effectiveHigh >= targetLow then Just (ConversionRule remappedLow remappedHigh newModifier) else Nothing
+   in result
+
+generateGapFills :: ConversionRule -> [ConversionRule] -> [ConversionRule]
+generateGapFills source [] = [source]
+generateGapFills source modifications =
+  let thisModification = head modifications
+      remainingModifications = drop 1 modifications
+      sourceLow = rangeStart source
+      sourceHigh = rangeEnd source
+      sourceModifier = modifierValue source
+      modLow = rangeStart thisModification
+      modHigh = rangeEnd thisModification
+      remainingRule = ConversionRule (modHigh + 1) sourceHigh sourceModifier
+      restOfIt = if modHigh < sourceHigh then generateGapFills remainingRule remainingModifications else []
+      result = if sourceLow < modLow then ConversionRule sourceLow (modLow - 1) sourceModifier : restOfIt else restOfIt
+   in result
+
+generateRangesFor :: [Int] -> [(Int, Int)]
+generateRangesFor [] = []
+generateRangesFor (a : b : xs) = (a, a + b - 1) : generateRangesFor xs
+
+generateStartersFor :: (Int, Int) -> [ConversionRule] -> [Int]
+generateStartersFor _ [] = []
+generateStartersFor (rangeLow, rangeHigh) (thisRule : remainingRules) =
+  let ruleLow = rangeStart thisRule
+      ruleHigh = rangeEnd thisRule
+      lowestPossibleSeedInRange = max rangeLow ruleLow
+      result = if rangeLow <= ruleHigh && rangeHigh >= ruleLow then lowestPossibleSeedInRange : xs else xs
+   in result
+  where
+    xs = generateStartersFor (rangeLow, rangeHigh) remainingRules
+
+--   we have source_low and source_high - the range of initial input numbers, in the example 10..100
+--   we have source_modifier - what transformation should be done to items in this range so far, in the example +80
+--   we then have effective_low, effective_high - the translation of those values at the current layer using the source modifier, in the example 90..180 (source_modifier=+80)
+--   we have the target_low and target_high, target_modifier - the range of the rules in this current layer, in the example 50..120, -10
+--   we can compute the overlap section - overlap_low..overlap_high - this is the overlap between effective_low..effective_high and target_low..target_high in the example 90..120
+--   we can also compute the left-overs on either end of the overlap - below_low..below_high, above_low..above_high which describe the unaffected parts of the effective range, in the example : below=None, above=121..180
+--                           left-overs are the parts of the effective_range that are not part of the target_range - we only need to worry about dividing up the effective_range as we will loop through all of these
+--   we can now translate these ranges back to source values :
+--   below=None -> Do Nothing
+--   overlap_low..overlap_high -> (overlap_low - source_modifier)..(overlap_high - source_modifier) = source_modifier+target_modifier -> (90-80)..(120-80) = (80+(-10)) -> 10..40 = +70
+--   above=121..180 -> (above_low - source_modifier)..(above_high - source_modifier) = source_modifier -> (121-80)..(180-80) = +80 = 41..100 = +80
 
 generateSegments :: [ConversionTable] -> [(Int, Int)] -> [(Int, Int)]
 generateSegments [] x = x
@@ -258,7 +387,7 @@ extrapolateRanges ranges startSegments =
       thisRange = [a .. a + b - 1]
       -- fix this part and we're golden
       remainingRanges = drop 2 ranges
-   in thisRange ++ (extrapolateRanges remainingRanges)
+   in thisRange ++ (extrapolateRanges remainingRanges startSegments)
 
 runConversions :: Int -> [ConversionTable] -> Int
 runConversions x [] = x
@@ -268,6 +397,13 @@ runConversions x tableList =
       newX = if null convertedValues then x else head convertedValues
       remainingTables = drop 1 tableList
    in runConversions newX remainingTables
+
+runRules :: Int -> [ConversionRule] -> Int
+runRules x [] = x
+runRules x rules =
+  let convertedValues = catMaybes [if x >= rangeStart r && x <= rangeEnd r then Just (x + modifierValue r) else Nothing | r <- rules]
+      result = if null convertedValues then error "should now be impossible??" else head convertedValues
+   in result
 
 readConversionTable :: [String] -> ConversionTable
 readConversionTable tableLines =

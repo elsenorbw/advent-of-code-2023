@@ -19,13 +19,13 @@
 -- J is a 90-degree bend connecting north and west.
 -- 7 is a 90-degree bend connecting south and west.
 -- F is a 90-degree bend connecting south and east.
--- . is ground; there is no pipe in this tile.
+-- . is ground; there is no pipe in this t-expanderile.
 -- S is the starting position of the animal; there is a pipe on this tile, but your sketch doesn't show what shape the pipe has.
 -- Based on the acoustics of the animal's scurrying, you're confident the pipe that contains the animal is one large, continuous loop.
 
 -- For example, here is a square loop of pipe:
 
--- .....
+-- .....-expander
 -- .F-7.
 -- .|.|.
 -- .L-J.
@@ -208,6 +208,7 @@
 
 import Data.Map (Map, empty, findWithDefault, insert, toList)
 import Data.Maybe (catMaybes)
+import Debug.Trace
 
 main = interact mainFunc
 
@@ -219,7 +220,12 @@ mainFunc input =
       initialLocationMap = setWalkLocationsStateInLocationMap Walked locationMap startPoints
       walkResult = walkUntilWeMeetAgain startPoints pipelineMap initialLocationMap
       onlyWalls = removeNonWalls walkResult
-      addedOutside = addBorder onlyWalls
+      expandedMap = expandMap onlyWalls
+      easyMap = easyOutsideMap expandedMap
+      inOutMap = walkEmptyZonesForVictory easyMap
+      -- way too slow unfortunately
+      -- inOutMap = setInOutValues easyMap
+      result = countInternalLocations inOutMap
    in "pipelineMap: "
         ++ show pipelineMap
         ++ "\nLocationMap:"
@@ -232,8 +238,14 @@ mainFunc input =
         ++ printLocationMap walkResult
         ++ "\nonlyWalls : "
         ++ printLocationMap onlyWalls
-        ++ "\naddedOutside : "
-        ++ printLocationMap addedOutside
+        ++ "\nexpandedMap : "
+        ++ printExpandedMap expandedMap
+        ++ "\neasyOutsides : "
+        ++ printExpandedMap easyMap
+        ++ "\ninOutMap : "
+        ++ printExpandedMap inOutMap
+        ++ "\nresult : "
+        ++ show result
         ++ "\n"
 
 data PipelineMap = PipelineMap
@@ -256,12 +268,144 @@ data Location = Location
 
 data Pipe = Empty | Horizontal | Vertical | TopLeft | TopRight | BottomLeft | BottomRight | Start deriving (Show, Eq)
 
-data PipeState = Unknown | Walked | Inside | Outside deriving (Show, Eq)
+data PipeState = Unknown | Walked | Inside | Outside | EmptyState deriving (Show, Eq)
 
 newtype LocationMap = LocationMap
   { pipes :: Map Location (Pipe, PipeState)
   }
   deriving (Show)
+
+newtype ExpandedMap = ExpandedMap
+  { mapData :: Map Location (Bool, PipeState)
+  }
+  deriving (Show)
+
+walkEmptyZonesForVictory :: ExpandedMap -> ExpandedMap
+walkEmptyZonesForVictory map
+  | null emptySpaces = map
+  | otherwise =
+      let startingSpace = head emptySpaces
+          (connectedLocations, touchedOutside) = walkTheEmptyRoad map [] [startingSpace] False
+          newMap = setExpandedStates map connectedLocations (if touchedOutside then Outside else Inside)
+       in walkEmptyZonesForVictory newMap
+  where
+    emptySpaces = getEmptyLocations map
+
+walkTheEmptyRoad :: ExpandedMap -> [Location] -> [Location] -> Bool -> ([Location], Bool)
+-- if there are no locations left to visit then we're good
+walkTheEmptyRoad map alreadyVisited [] touchedOutside = (alreadyVisited, touchedOutside)
+walkTheEmptyRoad map alreadyVisited (location : remainingLocations) touchedOutside
+  -- check that we've not been here already, it can easily happen
+  | location `elem` alreadyVisited = walkTheEmptyRoad map alreadyVisited remainingLocations touchedOutside
+  -- ok, this is a new place, off we go
+  | otherwise =
+      let neighbours = generateNeigbours location
+          -- figure out new places we can go next
+          newNeighbours = filter (`notElem` alreadyVisited) neighbours
+          neighbourInfo = [(x, getLocationFromExtendedMap x map) | x <- newNeighbours]
+          walkableNeighbours = [fst x | x <- filter emptyLocation neighbourInfo]
+
+          -- and decide whether standing here means we have touched the outside
+          neighbourStates = [snd (getLocationFromExtendedMap x map) | x <- neighbours]
+          outsideNeighbours = filter (== Outside) neighbourStates
+          newTouchedOutside = touchedOutside || not (null outsideNeighbours)
+          -- and now, walk ALL walkable neighbours.. failure to walk them all gets you random results which aren't cool
+          (ultimateAlreadyVisited, ultimateTouchedOutside) = walkTheEmptyRoad map newAlreadyVisited walkableNeighbours newTouchedOutside
+       in -- get the results together (merge time)
+          walkTheEmptyRoad map ultimateAlreadyVisited remainingLocations (newTouchedOutside || ultimateTouchedOutside)
+  where
+    newAlreadyVisited = location : alreadyVisited
+
+-- Quickly add lines of spaces from each side to reduce the problem space
+easyOutsideMap :: ExpandedMap -> ExpandedMap
+easyOutsideMap map =
+  let (minX, maxX, minY, maxY) = getExpandedMapDimensions map
+      yRange = [minY .. maxY]
+      emptyBlocks = concat [findEmptyBlock map minX maxX y | y <- yRange]
+   in setExpandedStates map emptyBlocks Outside
+
+findEmptyBlock :: ExpandedMap -> Int -> Int -> Int -> [Location]
+findEmptyBlock map x1 x2 y =
+  let emptyLeft = takeWhile (isEmptySpace map) [Location x y | x <- [x1 .. x2]]
+      emptyRight = takeWhile (isEmptySpace map) [Location x y | x <- [x2, (x2 - 1) .. x1]]
+   in emptyLeft ++ emptyRight
+
+isEmptySpace :: ExpandedMap -> Location -> Bool
+isEmptySpace map location =
+  let (solid, _) = getLocationFromExtendedMap location map
+   in not solid
+
+setInOutValues :: ExpandedMap -> ExpandedMap
+setInOutValues map =
+  let emptySpaces = getEmptyLocations map
+   in if null emptySpaces then map else setInOutValues (addOneEmptySpaceBlock map emptySpaces)
+
+addOneEmptySpaceBlock :: ExpandedMap -> [Location] -> ExpandedMap
+addOneEmptySpaceBlock map (firstEmpty : remainingEmpty) =
+  let emptyZone = connectEmpties [firstEmpty] remainingEmpty
+      newState = if touchesOutside emptyZone map then Outside else Inside
+   in setExpandedStates map emptyZone newState
+
+connectEmpties :: [Location] -> [Location] -> [Location]
+connectEmpties zoneList empties =
+  let attachedNeighbours = catMaybes [if overlaps (generateNeigbours loc) zoneList then Just loc else Nothing | loc <- empties]
+      newEmpties = catMaybes [if loc `elem` attachedNeighbours then Nothing else Just loc | loc <- empties]
+      newZoneList = zoneList ++ attachedNeighbours
+   in if null attachedNeighbours then zoneList else connectEmpties newZoneList newEmpties
+
+touchesOutside :: [Location] -> ExpandedMap -> Bool
+touchesOutside zone map =
+  let (minX, maxX, minY, maxY) = getExpandedMapDimensions map
+      xs = traceShowId [theX l | l <- zone]
+      ys = traceShowId [theY l | l <- zone]
+      touchesLeft = smallest xs == minX
+      touchesRight = largest xs == maxX
+      touchesTop = smallest ys == minY
+      touchesBottom = largest ys == maxY
+   in touchesLeft || touchesRight || touchesBottom || touchesTop
+
+generateNeigbours :: Location -> [Location]
+generateNeigbours location =
+  [ Location (x - 1) y,
+    Location (x + 1) y,
+    Location x (y - 1),
+    Location x (y + 1)
+  ]
+  where
+    x = theX location
+    y = theY location
+
+countInternalLocations :: ExpandedMap -> Int
+countInternalLocations map =
+  let (minX, maxX, minY, maxY) = getExpandedMapDimensions map
+      counts = [if getStateForLocationFromExpandedMap (Location x y) map == Inside then 1 else 0 | x <- [1, 4 .. maxX], y <- [1, 4 .. maxY]]
+      total = sum counts
+   in total
+
+getStateForLocationFromExpandedMap :: Location -> ExpandedMap -> PipeState
+getStateForLocationFromExpandedMap location map =
+  let (_, state) = getLocationFromExtendedMap location map
+   in state
+
+setExpandedStates :: ExpandedMap -> [Location] -> PipeState -> ExpandedMap
+setExpandedStates map locations state = foldl (updateExpandedState state) map locations
+
+updateExpandedState :: PipeState -> ExpandedMap -> Location -> ExpandedMap
+updateExpandedState state map location =
+  let (solid, _) = getLocationFromExtendedMap location map
+   in ExpandedMap (insert location (solid, state) (mapData map))
+
+getEmptyLocations :: ExpandedMap -> [Location]
+getEmptyLocations map =
+  let l = toList $ mapData map
+      empty = filter emptyLocation l
+   in [fst x | x <- empty]
+
+emptyLocation :: (Location, (Bool, PipeState)) -> Bool
+emptyLocation (_, (solid, state)) = state == Unknown && not solid
+
+emptyExpandedTile :: (Bool, PipeState) -> Bool
+emptyExpandedTile (solid, state) = state == Unknown && not solid
 
 addBorder :: LocationMap -> LocationMap
 addBorder map =
@@ -289,6 +433,30 @@ removeUnwalked map location =
       storeVal = if state == Walked then (pipe, state) else (Empty, state)
    in LocationMap (insert location storeVal (pipes map))
 
+printExpandedMap :: ExpandedMap -> String
+printExpandedMap map =
+  let (minX, maxX, minY, maxY) = getExpandedMapDimensions map
+      rows = [printOneExpandedRow map y minX maxX ++ "\n" | y <- [minY .. maxY]]
+   in "\n" ++ concat rows
+
+printOneExpandedRow :: ExpandedMap -> Int -> Int -> Int -> String
+printOneExpandedRow map y x maxx
+  | x > maxx = ""
+  | otherwise =
+      let (solid, state) = getLocationFromExtendedMap (Location x y) map
+          c = expandedCharFor solid state
+       in c : printOneExpandedRow map y (x + 1) maxx
+
+expandedCharFor :: Bool -> PipeState -> Char
+expandedCharFor solid state
+  | solid = '#'
+  | state == Unknown = ' '
+  | state == Inside = '+'
+  | state == Outside = '-'
+  | state == Walked = 'W'
+  | state == EmptyState = 'E'
+  | otherwise = error "Silly error"
+
 printLocationMap :: LocationMap -> String
 printLocationMap map =
   let (minX, maxX, minY, maxY) = getMapDimensions map
@@ -305,6 +473,18 @@ printOneRow map y x maxx
 
 getLocationFromMap :: Location -> LocationMap -> (Pipe, PipeState)
 getLocationFromMap location map = findWithDefault (Empty, Unknown) location (pipes map)
+
+getLocationFromExtendedMap :: Location -> ExpandedMap -> (Bool, PipeState)
+getLocationFromExtendedMap location map = findWithDefault (False, Unknown) location (mapData map)
+
+getExpandedMapDimensions :: ExpandedMap -> (Int, Int, Int, Int)
+getExpandedMapDimensions map =
+  let gridMap = mapData map
+      l = toList gridMap
+      locations = [fst x | x <- l]
+      xs = [theX l | l <- locations]
+      ys = [theY l | l <- locations]
+   in (smallest xs, largest xs, smallest ys, largest ys)
 
 getMapDimensions :: LocationMap -> (Int, Int, Int, Int)
 getMapDimensions map =
@@ -454,6 +634,148 @@ right (Location x y) = Location (x + 1) y
 left :: Location -> Location
 left (Location x y) = Location (x - 1) y
 
+expandMap :: LocationMap -> ExpandedMap
+expandMap map =
+  let emptyExpanded = ExpandedMap empty
+      (minX, maxX, minY, maxY) = getMapDimensions map
+      allLocations = [Location x y | x <- [minX .. maxX], y <- [minY .. maxY]]
+      expandedLocations = concat [generateExpandedLocations map l | l <- allLocations]
+   in foldl addLocationToExpandedMap emptyExpanded expandedLocations
+
+addLocationToExpandedMap :: ExpandedMap -> (Location, (Bool, PipeState)) -> ExpandedMap
+addLocationToExpandedMap map (location, mapValue) = ExpandedMap (insert location mapValue (mapData map))
+
+generateExpandedLocations :: LocationMap -> Location -> [(Location, (Bool, PipeState))]
+generateExpandedLocations map location =
+  let (pipe, _) = getLocationFromMap location map
+   in generateExpandedLocationsForPipe pipe location
+
+-- Turn a single pipe into a 3x3 block
+generateExpandedLocationsForPipe :: Pipe -> Location -> [(Location, (Bool, PipeState))]
+generateExpandedLocationsForPipe pipe location
+  | pipe == Vertical = expandedVertical targetX targetY
+  | pipe == Horizontal = expandedHorizontal targetX targetY
+  | pipe == TopLeft = expandedTopLeft targetX targetY
+  | pipe == TopRight = expandedTopRight targetX targetY
+  | pipe == BottomLeft = expandedBottomLeft targetX targetY
+  | pipe == BottomRight = expandedBottomRight targetX targetY
+  | pipe == Empty = expandedEmpty targetX targetY
+  | pipe == Start = expandedStart targetX targetY
+  | otherwise = error ("No idea what to do with a pipe of " ++ show pipe)
+  where
+    sourceX = theX location
+    sourceY = theY location
+    targetX = sourceX * 3
+    targetY = sourceY * 3
+
+populated = (True, Walked)
+
+unpopulated = (False, Unknown)
+
+expandedVertical :: Int -> Int -> [(Location, (Bool, PipeState))]
+expandedVertical x y =
+  [ (Location (x + 0) (y + 0), unpopulated),
+    (Location (x + 1) (y + 0), populated),
+    (Location (x + 2) (y + 0), unpopulated),
+    (Location (x + 0) (y + 1), unpopulated),
+    (Location (x + 1) (y + 1), populated),
+    (Location (x + 2) (y + 1), unpopulated),
+    (Location (x + 0) (y + 2), unpopulated),
+    (Location (x + 1) (y + 2), populated),
+    (Location (x + 2) (y + 2), unpopulated)
+  ]
+
+expandedHorizontal :: Int -> Int -> [(Location, (Bool, PipeState))]
+expandedHorizontal x y =
+  [ (Location (x + 0) (y + 0), unpopulated),
+    (Location (x + 1) (y + 0), unpopulated),
+    (Location (x + 2) (y + 0), unpopulated),
+    (Location (x + 0) (y + 1), populated),
+    (Location (x + 1) (y + 1), populated),
+    (Location (x + 2) (y + 1), populated),
+    (Location (x + 0) (y + 2), unpopulated),
+    (Location (x + 1) (y + 2), unpopulated),
+    (Location (x + 2) (y + 2), unpopulated)
+  ]
+
+expandedBottomLeft :: Int -> Int -> [(Location, (Bool, PipeState))]
+expandedBottomLeft x y =
+  [ (Location (x + 0) (y + 0), unpopulated),
+    (Location (x + 1) (y + 0), populated),
+    (Location (x + 2) (y + 0), unpopulated),
+    (Location (x + 0) (y + 1), unpopulated),
+    (Location (x + 1) (y + 1), populated),
+    (Location (x + 2) (y + 1), populated),
+    (Location (x + 0) (y + 2), unpopulated),
+    (Location (x + 1) (y + 2), unpopulated),
+    (Location (x + 2) (y + 2), unpopulated)
+  ]
+
+expandedBottomRight :: Int -> Int -> [(Location, (Bool, PipeState))]
+expandedBottomRight x y =
+  [ (Location (x + 0) (y + 0), unpopulated),
+    (Location (x + 1) (y + 0), populated),
+    (Location (x + 2) (y + 0), unpopulated),
+    (Location (x + 0) (y + 1), populated),
+    (Location (x + 1) (y + 1), populated),
+    (Location (x + 2) (y + 1), unpopulated),
+    (Location (x + 0) (y + 2), unpopulated),
+    (Location (x + 1) (y + 2), unpopulated),
+    (Location (x + 2) (y + 2), unpopulated)
+  ]
+
+expandedTopLeft :: Int -> Int -> [(Location, (Bool, PipeState))]
+expandedTopLeft x y =
+  [ (Location (x + 0) (y + 0), unpopulated),
+    (Location (x + 1) (y + 0), unpopulated),
+    (Location (x + 2) (y + 0), unpopulated),
+    (Location (x + 0) (y + 1), unpopulated),
+    (Location (x + 1) (y + 1), populated),
+    (Location (x + 2) (y + 1), populated),
+    (Location (x + 0) (y + 2), unpopulated),
+    (Location (x + 1) (y + 2), populated),
+    (Location (x + 2) (y + 2), unpopulated)
+  ]
+
+expandedTopRight :: Int -> Int -> [(Location, (Bool, PipeState))]
+expandedTopRight x y =
+  [ (Location (x + 0) (y + 0), unpopulated),
+    (Location (x + 1) (y + 0), unpopulated),
+    (Location (x + 2) (y + 0), unpopulated),
+    (Location (x + 0) (y + 1), populated),
+    (Location (x + 1) (y + 1), populated),
+    (Location (x + 2) (y + 1), unpopulated),
+    (Location (x + 0) (y + 2), unpopulated),
+    (Location (x + 1) (y + 2), populated),
+    (Location (x + 2) (y + 2), unpopulated)
+  ]
+
+expandedEmpty :: Int -> Int -> [(Location, (Bool, PipeState))]
+expandedEmpty x y =
+  [ (Location (x + 0) (y + 0), unpopulated),
+    (Location (x + 1) (y + 0), unpopulated),
+    (Location (x + 2) (y + 0), unpopulated),
+    (Location (x + 0) (y + 1), unpopulated),
+    (Location (x + 1) (y + 1), unpopulated),
+    (Location (x + 2) (y + 1), unpopulated),
+    (Location (x + 0) (y + 2), unpopulated),
+    (Location (x + 1) (y + 2), unpopulated),
+    (Location (x + 2) (y + 2), unpopulated)
+  ]
+
+expandedStart :: Int -> Int -> [(Location, (Bool, PipeState))]
+expandedStart x y =
+  [ (Location (x + 0) (y + 0), unpopulated),
+    (Location (x + 1) (y + 0), populated),
+    (Location (x + 2) (y + 0), unpopulated),
+    (Location (x + 0) (y + 1), populated),
+    (Location (x + 1) (y + 1), populated),
+    (Location (x + 2) (y + 1), populated),
+    (Location (x + 0) (y + 2), unpopulated),
+    (Location (x + 1) (y + 2), populated),
+    (Location (x + 2) (y + 2), unpopulated)
+  ]
+
 -- Utility functions
 splitOn' :: (Eq a) => a -> [a] -> [[a]]
 splitOn' _ [] = []
@@ -471,3 +793,8 @@ largest (x : xs) = foldl max x xs
 
 smallest :: (Ord a) => [a] -> a
 smallest (x : xs) = foldl min x xs
+
+overlaps :: (Eq a) => [a] -> [a] -> Bool
+overlaps a b =
+  let inBoth = catMaybes [if x `elem` b then Just x else Nothing | x <- a]
+   in not (null inBoth)
